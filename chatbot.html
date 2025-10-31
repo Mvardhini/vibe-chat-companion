@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VibeChat Adaptive Companion</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load React, ReactDOM, and Babel for running JSX in the browser -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        /* Custom CSS to establish the flexible viewport structure */
+        body {
+            /* Full viewport size for both mobile and desktop */
+            width: 100vw;
+            height: 100vh;
+            
+            /* Centering for the main container on large screens */
+            display: flex;
+            justify-content: center;
+            align-items: center; 
+            
+            background-color: #f3f4f6;
+            font-family: 'Inter', sans-serif;
+            /* Prevents overflow from scrollbar on some mobile setups */
+            overflow: hidden; 
+        }
+        #root {
+            /* Ensures the React app can fill the flexible container */
+            width: 100%; 
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="root">
+        <!-- React will render the App component here -->
+    </div>
+
+    <!-- The main application code goes here -->
+    <script type="text/babel">
+        // Place your actual Gemini API Key here if running externally:
+        const apiKey = "AIzaSyCxTuw6N9ykRfAOh-E0tUAqtzAEsBwXVJQ "; 
+
+        const { useState, useEffect, useCallback, useRef } = React;
+
+        // Helper for exponential backoff during API calls
+        const withExponentialBackoff = async (fn, maxRetries = 5, delay = 1000) => {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    return await fn();
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    const backoffDelay = delay * Math.pow(2, i) + Math.random() * 1000;
+                    console.warn(`Attempt ${i + 1} failed. Retrying in ${backoffDelay}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, backoffDelay));
+                }
+            }
+        };
+
+        const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=';
+
+        // --- MARKDOWN FORMATTING HELPER ---
+        const formatMarkdownForDisplay = (text) => {
+            if (!text) return { __html: '' };
+
+            // 1. Convert bold (**text**) to <b>text</b>
+            let htmlText = text.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+            // 2. Convert italics (*text*) to <i>text</i>
+            htmlText = htmlText.replace(/\*(.*?)\*/g, '<i>$1</i>');
+            // 3. Convert newlines to breaks for proper spacing
+            htmlText = htmlText.replace(/\n/g, '<br />');
+
+            return { __html: htmlText };
+        };
+
+        // --- SINGLE ADAPTIVE COMPANION DEFINITION ---
+        const ADAPTIVE_COMPANION = { 
+            id: 'adaptive', 
+            name: 'Adaptive Companion', 
+            icon: '😊', 
+            systemInstruction: 'You are the **VibeChat Adaptive Companion**. Your primary goal is to provide a helpful, friendly, and highly personalized chat experience. **Critically, before responding, you must analyze the user\'s prompt and conversation history to accurately determine their current mood (e.g., stressed, excited, curious, neutral).** Once the mood is inferred, you must dynamically adjust your tone and response style to match the user\'s emotional state. If the user is stressed, offer calm, empathetic support. If they are excited, share their enthusiasm. Always maintain a warm, supportive, and approachable demeanor.'
+        };
+
+        // --- MAIN APP COMPONENT ---
+        function App() {
+            // State now only holds the messages array locally
+            const [messages, setMessages] = useState([]);
+            const [isSending, setIsSending] = useState(false);
+            const [inputMessage, setInputMessage] = useState('');
+
+            const currentPersona = ADAPTIVE_COMPANION; 
+            const chatContainerRef = useRef(null);
+            
+            // Auto-scroll logic
+            useEffect(() => {
+                if (chatContainerRef.current) {
+                    chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+                }
+            }, [messages]);
+
+            // Helper to add a message to the local state
+            const addMessage = useCallback((role, text) => {
+                setMessages(prevMessages => [...prevMessages, {
+                    id: Date.now() + Math.random(), // Simple unique ID
+                    role,
+                    text,
+                    personaId: currentPersona.id,
+                    createdAt: new Date().toISOString(),
+                }]);
+            }, [currentPersona.id]);
+
+            // Send Message Handler
+            const handleSendMessage = async () => {
+                const text = inputMessage.trim();
+                if (isSending || text === '') return;
+
+                setIsSending(true);
+                setInputMessage('');
+
+                // 2a. Save User Message to Local State
+                addMessage('user', text);
+                
+                // 2b. Prepare history for Gemini API (use existing messages + new user message)
+                const chatHistoryForAPI = [...messages.map(m => ({
+                    role: m.role,
+                    parts: [{ text: m.text }]
+                })), { role: 'user', parts: [{ text: text }] }];
+
+
+                const payload = {
+                    contents: chatHistoryForAPI,
+                    systemInstruction: { parts: [{ text: currentPersona.systemInstruction }] },
+                };
+                
+                try {
+                    const fetchFn = async () => {
+                        // The apiKey variable is defined at the top of the script block.
+                        const response = await fetch(`${GEMINI_API_URL}${apiKey}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        if (!response.ok) {
+                            throw new Error(`API Error: ${response.status} ${response.statusText}`);
+                        }
+
+                        const result = await response.json();
+                        const aiText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                        if (!aiText) {
+                            throw new Error("Received empty response from the AI.");
+                        }
+                        
+                        // 2c. Save AI Response to Local State
+                        addMessage('model', aiText);
+                    };
+
+                    await withExponentialBackoff(fetchFn);
+
+                } catch (error) {
+                    console.error("Gemini API call failed:", error);
+                    // Show error message
+                    addMessage('model', `[VibeChat Error] Sorry, I couldn't connect right now. Error: ${error.message.substring(0, 50)}...`);
+
+                } finally {
+                    setIsSending(false);
+                }
+            };
+            
+            // Tailwind classes for styling (using web elements)
+            const styles = {
+                // Fully responsive container
+                // On mobile: w-full, h-screen
+                // On desktop (sm+): constrained max-w-md, centered (mx-auto), rounded edges, shadow
+                appContainer: "flex flex-col w-full h-screen bg-white sm:max-w-md sm:rounded-xl sm:shadow-2xl mx-auto",
+                
+                header: "flex flex-col p-4 bg-indigo-600 text-white shadow-lg sm:rounded-t-xl",
+                title: "text-2xl font-bold",
+                chatWindow: "flex-1 overflow-y-auto p-4 space-y-4",
+                
+                // Message Bubbles
+                messageUser: "flex justify-end",
+                messageModel: "flex justify-start",
+                bubbleUser: "bg-indigo-500 text-white p-3 rounded-t-xl rounded-bl-xl max-w-xs shadow-md",
+                bubbleModel: "bg-white text-gray-800 p-3 rounded-t-xl rounded-br-xl max-w-xs shadow-md border border-gray-200",
+                
+                // Input Area
+                inputArea: "p-4 bg-white border-t border-gray-200 flex space-x-2 sm:rounded-b-xl",
+                inputField: "flex-1 p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500",
+                sendButton: "bg-indigo-600 text-white rounded-xl px-4 py-3 flex items-center justify-center disabled:bg-indigo-300 cursor-pointer",
+            };
+
+            // Render the UI
+            return (
+                <div className={styles.appContainer}>
+                    {/* Header - Now simplified */}
+                    <div className={styles.header}>
+                        <span className={styles.title}>VibeChat 💬</span>
+                    </div>
+                    
+                    {/* Chat Window */}
+                    <div className={styles.chatWindow} ref={chatContainerRef}>
+                        {messages.length === 0 && (
+                            <div className="text-center text-gray-500 pt-8">
+                                Start a conversation! The Companion will adapt to your mood and prompt.
+                            </div>
+                        )}
+                        {messages.map((msg) => (
+                            <div 
+                                key={msg.id} 
+                                className={msg.role === 'user' ? styles.messageUser : styles.messageModel}
+                            >
+                                <div className={msg.role === 'user' ? styles.bubbleUser : styles.bubbleModel}>
+                                    {/* Display persona icon for model responses */}
+                                    {msg.role === 'model' && (
+                                        <span className="mr-2">{currentPersona.icon}</span>
+                                    )}
+                                    
+                                    {/* Rendering: User messages are plain text, Model messages are formatted Markdown (bold/italics/newlines) */}
+                                    {msg.role === 'user' ? (
+                                        <span>{msg.text}</span>
+                                    ) : (
+                                        <span dangerouslySetInnerHTML={formatMarkdownForDisplay(msg.text)}></span>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+
+                        {/* Typing Indicator */}
+                        {isSending && (
+                            <div className={styles.messageModel}>
+                                <div className={styles.bubbleModel}>
+                                    <span className="animate-pulse text-gray-500">
+                                        {currentPersona.icon} VibeChat is analyzing your vibe...
+                                    </span>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Input Area */}
+                    <div className={styles.inputArea}>
+                        <input
+                            type="text"
+                            className={styles.inputField}
+                            placeholder="Tell me how you're feeling or what you need..."
+                            value={inputMessage}
+                            onChange={(e) => setInputMessage(e.target.value)}
+                            onKeyPress={(e) => { if (e.key === 'Enter') handleSendMessage(); }}
+                            disabled={isSending}
+                        />
+                        <button
+                            onClick={handleSendMessage}
+                            className={styles.sendButton}
+                            disabled={isSending || inputMessage.trim() === ''}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+        
+        // --- MANDATORY RENDERING CODE ---
+        // This command tells React to take the App component and display it inside the div with id="root".
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<App />);
+    </script>
+</body>
+</html>
